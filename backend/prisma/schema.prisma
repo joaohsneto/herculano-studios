@@ -1,0 +1,193 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CUSTOMER
+  ADMIN
+}
+
+enum ProductType {
+  BEAT
+  DRUM_KIT
+  SAMPLE_PACK
+  PRESET
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum AssetKind {
+  COVER
+  PREVIEW
+  DOWNLOAD
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  CANCELED
+  REFUNDED
+}
+
+enum PaymentProvider {
+  STRIPE
+  PAYPAL
+  MERCADO_PAGO
+  MANUAL
+}
+
+model User {
+  id           String         @id @default(cuid())
+  name         String
+  email        String         @unique
+  passwordHash String?
+  role         UserRole       @default(CUSTOMER)
+  emailVerifiedAt DateTime?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  refreshTokens RefreshToken[]
+  orders       Order[]
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Category {
+  id       String    @id @default(cuid())
+  name     String
+  slug     String    @unique
+  products Product[]
+}
+
+model Product {
+  id               String        @id @default(cuid())
+  name             String
+  slug             String        @unique
+  shortDescription String
+  description      String
+  type             ProductType
+  status           ProductStatus @default(DRAFT)
+  featured         Boolean       @default(false)
+  bpm              Int?
+  musicalKey       String?
+  categoryId       String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  category         Category?     @relation(fields: [categoryId], references: [id])
+  variants         ProductVariant[]
+  assets           MediaAsset[]
+  previewGroups    PreviewGroup[]
+  orderItems       OrderItem[]
+}
+
+model ProductVariant {
+  id          String   @id @default(cuid())
+  productId   String
+  name        String
+  sku         String   @unique
+  format      String?
+  licenseName String?
+  priceCents  Int
+  currency    String   @default("BRL")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  downloadAsset MediaAsset? @relation("VariantDownload")
+  orderItems  OrderItem[]
+}
+
+model MediaAsset {
+  id          String    @id @default(cuid())
+  productId   String
+  kind        AssetKind
+  storageKey  String    @unique
+  publicUrl   String?
+  fileName    String
+  mimeType    String
+  sizeBytes   BigInt
+  durationSec Float?
+  variantId   String?   @unique
+  createdAt   DateTime  @default(now())
+  product     Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant     ProductVariant? @relation("VariantDownload", fields: [variantId], references: [id])
+}
+
+model PreviewGroup {
+  id        String         @id @default(cuid())
+  productId String
+  name      String
+  position  Int            @default(0)
+  product   Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  items     PreviewAudio[]
+}
+
+model PreviewAudio {
+  id             String       @id @default(cuid())
+  groupId        String
+  name           String
+  storageKey     String       @unique
+  publicUrl      String
+  durationSec    Float?
+  sourceStartSec Float?
+  sourceEndSec   Float?
+  waveform       Json?
+  position       Int          @default(0)
+  group          PreviewGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+}
+
+model Order {
+  id            String          @id @default(cuid())
+  userId        String
+  status        OrderStatus     @default(PENDING)
+  currency      String
+  subtotalCents Int
+  totalCents    Int
+  provider      PaymentProvider?
+  providerRef   String?         @unique
+  paidAt        DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  user          User            @relation(fields: [userId], references: [id])
+  items         OrderItem[]
+  downloadTokens DownloadToken[]
+}
+
+model OrderItem {
+  id            String         @id @default(cuid())
+  orderId       String
+  productId     String
+  variantId     String
+  productName   String
+  variantName   String
+  unitPriceCents Int
+  order         Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product       Product        @relation(fields: [productId], references: [id])
+  variant       ProductVariant @relation(fields: [variantId], references: [id])
+}
+
+model DownloadToken {
+  id        String   @id @default(cuid())
+  orderId   String
+  tokenHash String   @unique
+  expiresAt DateTime
+  maxUses   Int      @default(5)
+  uses      Int      @default(0)
+  createdAt DateTime @default(now())
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}

@@ -1,0 +1,15 @@
+.tools/
+node_modules/
+.next/
+dist/
+.env
+.env.local
+*.log
+backend/storage/private/*
+backend/storage/previews/*
+!backend/storage/private/.gitkeep
+!backend/storage/previews/.gitkeep
+Thumbs.db
+.DS_Store
+frontend/node_modules/
+frontend/.next/

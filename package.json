@@ -1,0 +1,14 @@
+{
+  "name": "herculano-studios",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "dev": "concurrently -n web,api -c cyan,magenta \"pnpm --dir frontend dev\" \"pnpm --dir backend dev\"",
+    "build": "pnpm --dir backend build && pnpm --dir frontend build",
+    "db:up": "docker compose up -d database",
+    "db:down": "docker compose down",
+    "db:migrate": "pnpm --dir backend prisma:migrate",
+    "db:seed": "pnpm --dir backend prisma:seed"
+  },
+  "devDependencies": { "concurrently": "^9.2.1" }
+}
