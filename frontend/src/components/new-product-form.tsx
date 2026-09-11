@@ -5,9 +5,44 @@ import { AudioLines, FileArchive, Music2, PackageOpen, UploadCloud, X } from "lu
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 type Kind = "BEAT" | "DRUM_KIT";
+const CREATE_TIMEOUT_MS = 30_000;
+const PROCESSING_TIMEOUT_MS = 3 * 60_000;
+
+async function requestWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("A operação demorou mais que o esperado. Verifique a API e tente novamente.");
+    }
+    if (error instanceof TypeError) {
+      throw new Error("Não foi possível conectar ao servidor. Atualize a página e tente novamente.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function responseBody(response: Response) {
+  return response.json().catch(() => ({})) as Promise<{ message?: string; product?: { id: string } }>;
+}
+
+const makeSlug = (value: string) => value
+  .normalize("NFD")
+  .replace(/[\u0300-\u036f]/g, "")
+  .toLowerCase()
+  .trim()
+  .replace(/[^a-z0-9]+/g, "-")
+  .replace(/^-+|-+$/g, "");
 
 export function NewProductForm({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [type, setType] = useState<Kind>("BEAT");
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+  const [slugEdited, setSlugEdited] = useState(false);
   const [file, setFile] = useState<File>();
   const [audioUrl, setAudioUrl] = useState("");
   const [duration, setDuration] = useState(0);
@@ -31,27 +66,83 @@ export function NewProductForm({ onClose, onCreated }: { onClose: () => void; on
     audio.current.addEventListener("timeupdate",stop);
   }
   async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!file) return setMessage(type==="BEAT"?"Selecione o áudio do beat.":"Selecione o ZIP do kit.");
-    setSaving(true); setMessage("Salvando produto...");
-    const form=new FormData(event.currentTarget); const name=String(form.get("name")); const slug=String(form.get("slug"));
-    const formats=type==="BEAT"?["MP3","WAV"]:["ZIP"];
-    const prices=type==="BEAT"?[Number(form.get("mp3Price")),Number(form.get("wavPrice"))]:[Number(form.get("price"))];
-    const response=await fetch(API+"/api/products",{method:"POST",credentials:"include",headers:{"Content-Type":"application/json"},body:JSON.stringify({
-      name,slug,type,shortDescription:String(form.get("shortDescription")),description:String(form.get("description")),featured:false,
-      variants:formats.map((format,index)=>({name:format==="ZIP"?"Complete Kit":format,sku:(slug+"-"+format+"-"+Date.now()).toUpperCase(),format,licenseName:format==="ZIP"?"Royalty Free":"Licença "+format,priceCents:Math.round(prices[index]*100),currency:"BRL"}))
-    })});
-    const data=await response.json();
-    if(!response.ok){setSaving(false);return setMessage(data.message??"Não foi possível cadastrar.");}
-    setMessage(type==="BEAT"?"Gerando o trecho escolhido...":"Extraindo dois previews de cada pasta...");
-    const upload=new FormData(); upload.append("file",file);
-    let endpoint="";
-    if(type==="BEAT"){upload.append("name",name);upload.append("startSec",String(start));upload.append("endSec",String(end));endpoint="/beat-preview";}
-    else endpoint="/drum-kit-previews";
-    const media=await fetch(API+"/api/media/admin/products/"+data.product.id+endpoint,{method:"POST",credentials:"include",body:upload});
-    const result=await media.json();
-    if(!media.ok){setSaving(false);return setMessage("Cadastro cancelado: "+(result.message??"erro desconhecido"));}
-    await fetch(API+"/api/products/"+data.product.id+"/publish",{method:"PATCH",credentials:"include"});
-    setMessage(result.message??"Produto e previews cadastrados."); setSaving(false); setTimeout(onCreated,700);
+    event.preventDefault();
+    if (!file) return setMessage(type === "BEAT" ? "Selecione o áudio do beat." : "Selecione o ZIP do kit.");
+
+    let productId: string | undefined;
+    setSaving(true);
+    setMessage("Salvando produto...");
+
+    try {
+      const form = new FormData(event.currentTarget);
+      const productName = String(form.get("name"));
+      const productSlug = String(form.get("slug"));
+      const formats = type === "BEAT" ? ["MP3", "WAV"] : ["ZIP"];
+      const prices = type === "BEAT"
+        ? [Number(form.get("mp3Price")), Number(form.get("wavPrice"))]
+        : [Number(form.get("price"))];
+      const response = await requestWithTimeout(API + "/api/products", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: productName,
+          slug: productSlug,
+          type,
+          shortDescription: String(form.get("shortDescription")),
+          description: String(form.get("description")),
+          featured: false,
+          variants: formats.map((format, index) => ({
+            name: format === "ZIP" ? "Complete Kit" : format,
+            sku: (productSlug + "-" + format + "-" + Date.now()).toUpperCase(),
+            format,
+            licenseName: format === "ZIP" ? "Royalty Free" : "Licença " + format,
+            priceCents: Math.round(prices[index] * 100),
+            currency: "BRL"
+          }))
+        })
+      }, CREATE_TIMEOUT_MS);
+      const data = await responseBody(response);
+      if (!response.ok || !data.product?.id) throw new Error(data.message ?? "Não foi possível cadastrar o produto.");
+
+      productId = data.product.id;
+      setMessage(type === "BEAT" ? "Gerando o trecho escolhido..." : "Extraindo dois previews de cada pasta...");
+      const upload = new FormData();
+      upload.append("file", file);
+      let endpoint = "/drum-kit-previews";
+      if (type === "BEAT") {
+        upload.append("name", productName);
+        upload.append("startSec", String(start));
+        upload.append("endSec", String(end));
+        endpoint = "/beat-preview";
+      }
+
+      const media = await requestWithTimeout(API + "/api/media/admin/products/" + productId + endpoint, {
+        method: "POST",
+        credentials: "include",
+        body: upload
+      }, PROCESSING_TIMEOUT_MS);
+      const result = await responseBody(media);
+      if (!media.ok) throw new Error(result.message ?? "Não foi possível gerar os previews.");
+
+      const publish = await requestWithTimeout(API + "/api/products/" + productId + "/publish", {
+        method: "PATCH",
+        credentials: "include"
+      }, CREATE_TIMEOUT_MS);
+      const published = await responseBody(publish);
+      if (!publish.ok) throw new Error(published.message ?? "Os previews foram criados, mas não foi possível publicar o produto.");
+
+      setMessage(result.message ?? "Produto e previews cadastrados.");
+      window.setTimeout(onCreated, 700);
+    } catch (error) {
+      if (productId) {
+        await fetch(API + "/api/products/" + productId, { method: "DELETE", credentials: "include" }).catch(() => undefined);
+      }
+      const detail = error instanceof Error ? error.message : "erro desconhecido";
+      setMessage("Cadastro cancelado: " + detail);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return <div className="modal-backdrop" role="presentation"><form className="product-modal product-form" onSubmit={submit}>
@@ -61,8 +152,8 @@ export function NewProductForm({ onClose, onCreated }: { onClose: () => void; on
       <button type="button" className={type==="DRUM_KIT"?"active":""} onClick={()=>changeType("DRUM_KIT")}><PackageOpen/><span><strong>Drum Kit</strong><small>ZIP e 2 previews automáticos por pasta</small></span></button>
     </div>
     <section className="form-section"><h3>01. Informações do produto</h3><div className="form-grid">
-      <label>Nome<input name="name" required minLength={2} placeholder={type==="BEAT"?"Ex.: Afrobeat Type...":"Ex.: Brazilian Funk Essentials"}/></label>
-      <label>Slug<input name="slug" required pattern="[a-z0-9-]+" placeholder="nome-do-produto"/></label>
+      <label>Nome<input name="name" required minLength={2} value={name} onChange={event=>{const next=event.target.value;setName(next);if(!slugEdited)setSlug(makeSlug(next));}} placeholder={type==="BEAT"?"Ex.: Afrobeat Type...":"Ex.: Brazilian Funk Essentials"}/></label>
+      <label>Slug<input name="slug" required pattern="[a-z0-9-]+" value={slug} onChange={event=>{setSlug(makeSlug(event.target.value));setSlugEdited(true);}} placeholder="nome-do-produto"/></label>
       <label className="form-wide">Descrição curta<input name="shortDescription" required minLength={10}/></label>
       <label className="form-wide">Descrição completa<textarea name="description" required minLength={20} rows={4}/></label>
     </div></section>
@@ -80,4 +171,3 @@ export function NewProductForm({ onClose, onCreated }: { onClose: () => void; on
     <footer className="modal-footer"><button type="button" onClick={onClose}>Cancelar</button><button type="submit" disabled={saving}>{saving?"Processando...":"Cadastrar produto →"}</button></footer>
   </form></div>;
 }
-

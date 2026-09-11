@@ -1,8 +1,9 @@
 import { Router } from "express";
-import { ProductStatus, ProductType } from "@prisma/client";
+import { Prisma, ProductStatus, ProductType } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { requireAdmin, requireAuth } from "../middleware/auth.js";
+import { previewPath, privatePath, removeFile } from "../services/media.js";
 
 const router = Router();
 
@@ -53,16 +54,43 @@ router.post("/", requireAuth, requireAdmin, async (req, res) => {
   const input = productInput.safeParse(req.body);
   if (!input.success) return res.status(400).json({ message: "Dados inválidos.", issues: input.error.issues });
   const { variants, ...data } = input.data;
-  const product = await prisma.product.create({
-    data: { ...data, status: ProductStatus.DRAFT, variants: { create: variants } },
-    include: includeProduct
-  });
-  res.status(201).json({ product });
+  try {
+    const product = await prisma.product.create({
+      data: { ...data, status: ProductStatus.DRAFT, variants: { create: variants } },
+      include: includeProduct
+    });
+    res.status(201).json({ product });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return res.status(409).json({ message: "Este slug já está em uso. Escolha outro endereço para o produto." });
+    }
+    throw error;
+  }
 });
 
 router.patch("/:id/publish", requireAuth, requireAdmin, async (req, res) => {
   const product = await prisma.product.update({ where: { id: String(req.params.id) }, data: { status: ProductStatus.ACTIVE } });
   res.json({ product });
+});
+
+router.delete("/:id", requireAuth, requireAdmin, async (req, res) => {
+  const id = String(req.params.id);
+  const product = await prisma.product.findUnique({
+    where: { id },
+    include: {
+      assets: { select: { storageKey: true } },
+      previewGroups: { include: { items: { select: { storageKey: true } } } },
+      orderItems: { select: { id: true }, take: 1 }
+    }
+  });
+  if (!product) return res.status(404).json({ message: "Produto não encontrado." });
+  if (product.orderItems.length) return res.status(409).json({ message: "Este produto possui vendas registradas e não pode ser excluído." });
+
+  const privateFiles = product.assets.map(asset => privatePath(asset.storageKey));
+  const previewFiles = product.previewGroups.flatMap(group => group.items.map(item => previewPath(item.storageKey)));
+  await prisma.product.delete({ where: { id } });
+  await Promise.all([...privateFiles, ...previewFiles].map(removeFile));
+  res.json({ message: "Produto e previews excluídos com sucesso." });
 });
 
 export default router;

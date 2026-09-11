@@ -40,7 +40,9 @@ router.get("/previews/:key", async (req, res) => {
   const file = previewPath(preview.storageKey);
   const info = await stat(file).catch(() => null);
   if (!info) return res.status(404).json({ message: "Arquivo indisponível." });
-  res.set({ "Content-Type": "audio/mpeg", "Content-Length": String(info.size), "Cache-Control": "private, max-age=3600", "Content-Disposition": "inline", "Accept-Ranges": "none", "X-Content-Type-Options": "nosniff" });
+  const extension = path.extname(preview.storageKey).toLowerCase();
+  const mimeType = extension === ".wav" ? "audio/wav" : extension === ".flac" ? "audio/flac" : extension === ".aif" || extension === ".aiff" ? "audio/aiff" : "audio/mpeg";
+  res.set({ "Content-Type": mimeType, "Content-Length": String(info.size), "Cache-Control": "private, max-age=3600", "Content-Disposition": "inline", "Accept-Ranges": "none", "X-Content-Type-Options": "nosniff" });
   createReadStream(file).pipe(res);
 });
 
@@ -102,7 +104,7 @@ router.post("/admin/products/:productId/drum-kit-previews", requireAuth, require
           child.on("close", code => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(error || "Falha ao extrair áudio."))); child.on("error", reject);
         });
         await writeFile(source, bytes);
-        const generated = await generatePreview(source, 0, 8);
+        const generated = await generatePreview(source, 0, 8, { allowSourceFallback: true });
         await prisma.previewAudio.create({ data: { groupId: group.id, name: path.basename(entry, path.extname(entry)), storageKey: generated.fileName, publicUrl: `/api/media/previews/${generated.fileName}`, durationSec: generated.durationSec, position: itemPosition++ } });
         total++;
       }
@@ -115,4 +117,3 @@ router.post("/admin/products/:productId/drum-kit-previews", requireAuth, require
 });
 
 export default router;
-

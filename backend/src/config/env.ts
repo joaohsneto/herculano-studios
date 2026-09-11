@@ -8,6 +8,7 @@ const schema = z.object({
   JWT_SECRET: z.string().min(32),
   ACCESS_TOKEN_TTL: z.string().default("15m"),
   REFRESH_TOKEN_DAYS: z.coerce.number().default(30),
+  FFMPEG_PATH: z.string().default("ffmpeg"),
   PRIVATE_STORAGE_PATH: z.string().default("./storage/private"),
   PREVIEW_STORAGE_PATH: z.string().default("./storage/previews")
 });
