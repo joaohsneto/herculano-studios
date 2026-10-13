@@ -1,16 +1,17 @@
 import Link from "next/link";
+import { productTypeLabel, type ProductType } from "@/lib/product-types";
 
 export type StoreProduct = {
   id: string;
   name: string;
   slug: string;
-  type: "BEAT" | "DRUM_KIT" | "SAMPLE_PACK" | "PRESET";
+  type: ProductType;
   shortDescription: string;
   description?: string;
   status?: string;
   previewGroups?: Array<{id:string;name:string;position:number;items:Array<{id:string;name:string;publicUrl:string;durationSec?:number}>}>;
   assets?: Array<{publicUrl?:string;fileName:string}>;
-  variants: Array<{ id: string; name: string; priceCents: number; currency: string }>;
+  variants: Array<{ id: string; name: string; priceCents: number; currency: string; format?: string; licenseName?: string }>;
 };
 
 function money(cents: number, currency: string) {
@@ -23,14 +24,14 @@ export function ProductCard({ product, index }: { product: StoreProduct; index: 
   return (
     <article className="product-card">
       <Link href={"/products/" + product.slug} className={"cover cover-" + (index % 4)} aria-label={"Ver " + product.name}>
-        <span className="cover-kicker">{product.type === "BEAT" ? "Beat series" : "Essential sounds"}</span>
+        <span className="cover-kicker">{productTypeLabel(product.type)}</span>
         <strong>{product.name}</strong>
         <span className="cover-mark">HS</span>
         {product.type === "BEAT" && <span className="play">▶</span>}
       </Link>
       <div className="product-copy">
         <div>
-          <span className="product-type">{product.type.replace("_", " ")}</span>
+          <span className="product-type">{productTypeLabel(product.type)}</span>
           <h3><Link href={"/products/" + product.slug}>{product.name}</Link></h3>
         </div>
         <p>{product.shortDescription}</p>

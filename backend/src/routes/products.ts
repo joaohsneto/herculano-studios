@@ -40,6 +40,7 @@ const productInput = z.object({
   bpm: z.number().int().positive().optional(),
   musicalKey: z.string().optional(),
   featured: z.boolean().default(false),
+  deliveryInstructions: z.string().trim().max(10000).optional(),
   variants: z.array(z.object({
     name: z.string().min(1),
     sku: z.string().min(3),

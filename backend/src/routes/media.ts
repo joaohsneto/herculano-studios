@@ -1,10 +1,10 @@
+import { kitPreviewRouter } from "./kit-previews.js";
+import { libraryFilePath } from "./library.js";
+import { isValidPreviewRange } from "../services/preview-range.js";
 import { Router } from "express";
 import multer from "multer";
 import path from "node:path";
-import { createReadStream } from "node:fs";
-import { mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { spawn } from "node:child_process";
+import { rename, stat } from "node:fs/promises";
 import { nanoid } from "nanoid";
 import { AssetKind, ProductType } from "@prisma/client";
 import { z } from "zod";
@@ -17,23 +17,6 @@ await ensureStorage();
 const upload = multer({ dest: path.resolve(env.PRIVATE_STORAGE_PATH), limits: { fileSize: 2 * 1024 * 1024 * 1024, files: 1 } });
 const router = Router();
 
-function run(command: string, args: string[], collect = false) {
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn(command, args);
-    let output = ""; let error = "";
-    if (collect) child.stdout.on("data", chunk => output += chunk.toString());
-    child.stderr.on("data", chunk => error += chunk.toString());
-    child.on("error", reject);
-    child.on("close", code => code === 0 ? resolve(output) : reject(new Error(error || command + " falhou.")));
-  });
-}
-
-async function discardDraftProduct(productId: string) {
-  const previews = await prisma.previewAudio.findMany({ where: { group: { productId } }, select: { storageKey: true } });
-  await prisma.product.deleteMany({ where: { id: productId, status: "DRAFT" } });
-  await Promise.all(previews.map(item => removeFile(previewPath(item.storageKey))));
-}
-
 router.get("/previews/:key", async (req, res) => {
   const preview = await prisma.previewAudio.findUnique({ where: { storageKey: req.params.key } });
   if (!preview) return res.status(404).json({ message: "Preview não encontrado." });
@@ -42,78 +25,111 @@ router.get("/previews/:key", async (req, res) => {
   if (!info) return res.status(404).json({ message: "Arquivo indisponível." });
   const extension = path.extname(preview.storageKey).toLowerCase();
   const mimeType = extension === ".wav" ? "audio/wav" : extension === ".flac" ? "audio/flac" : extension === ".aif" || extension === ".aiff" ? "audio/aiff" : "audio/mpeg";
-  res.set({ "Content-Type": mimeType, "Content-Length": String(info.size), "Cache-Control": "private, max-age=3600", "Content-Disposition": "inline", "Accept-Ranges": "none", "X-Content-Type-Options": "nosniff" });
-  createReadStream(file).pipe(res);
+  res.set({ "Content-Type": mimeType, "Cache-Control": "private, max-age=3600", "Content-Disposition": "inline", "X-Content-Type-Options": "nosniff" });
+  // Express handles Safari byte-range requests (206/416) and HEAD responses.
+  res.sendFile(file, { acceptRanges: true });
+});
+
+router.get("/covers/:id", async (req, res) => {
+  const asset = await prisma.mediaAsset.findFirst({ where: { id: String(req.params.id), kind: "COVER" } });
+  if (!asset || !/^image\/(jpeg|png|webp|gif|avif)$/.test(asset.mimeType)) return res.status(404).json({ message: "Capa indisponível." });
+  const file = libraryFilePath(asset.storageKey);
+  if (!file || !await stat(file).catch(() => null)) return res.status(404).json({ message: "Capa indisponível." });
+  res.set({ "Content-Type": asset.mimeType, "Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff" });
+  res.sendFile(file);
+});
+
+router.get("/admin/products/:productId/assets", requireAuth, requireAdmin, async (req, res) => {
+  const assets = await prisma.mediaAsset.findMany({ where: { productId: String(req.params.productId), kind: { in: ["DOWNLOAD", "COVER"] } }, orderBy: { createdAt: "asc" }, select: { id: true, kind: true, fileName: true, sizeBytes: true, variantId: true } });
+  res.json({ assets: assets.map(asset => ({ ...asset, sizeBytes: Number(asset.sizeBytes) })) });
 });
 
 router.post("/admin/products/:productId/assets", requireAuth, requireAdmin, upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: "Selecione um arquivo." });
-  const body = z.object({ kind: z.nativeEnum(AssetKind), variantId: z.string().optional() }).safeParse(req.body);
-  if (!body.success || body.data.kind === AssetKind.PREVIEW) { await removeFile(req.file.path); return res.status(400).json({ message: "Tipo de arquivo inválido." }); }
+  const body = z.object({ kind: z.enum(["COVER", "DOWNLOAD"]), variantId: z.string().min(1).optional() }).safeParse(req.body);
+  if (!body.success) { await removeFile(req.file.path); return res.status(400).json({ message: "Tipo de arquivo inválido." }); }
+  const productId = String(req.params.productId);
+  const product = await prisma.product.findUnique({ where: { id: productId }, select: { variants: { select: { id: true } } } });
+  if (!product || (body.data.variantId && !product.variants.some(variant => variant.id === body.data.variantId))) {
+    await removeFile(req.file.path); return res.status(400).json({ message: "Produto ou versão inválida." });
+  }
+  if (body.data.kind === "COVER" && (!/^image\/(jpeg|png|webp|gif|avif)$/.test(req.file.mimetype) || req.file.size > 10 * 1024 * 1024)) {
+    await removeFile(req.file.path); return res.status(400).json({ message: "Envie uma capa JPG, PNG, WebP, GIF ou AVIF de até 10 MB." });
+  }
   const storageKey = `${nanoid()}-${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
-  await rename(req.file.path, privatePath(storageKey));
-  const asset = await prisma.mediaAsset.create({ data: { productId: String(req.params.productId), kind: body.data.kind, storageKey, fileName: req.file.originalname, mimeType: req.file.mimetype, sizeBytes: req.file.size, variantId: body.data.variantId } });
-  res.status(201).json({ asset: { ...asset, sizeBytes: Number(asset.sizeBytes) } });
+  try {
+    await rename(req.file.path, privatePath(storageKey));
+    const asset = await prisma.mediaAsset.create({ data: { productId, kind: body.data.kind, storageKey, fileName: req.file.originalname, mimeType: req.file.mimetype, sizeBytes: req.file.size, variantId: body.data.kind === "DOWNLOAD" ? body.data.variantId : undefined } });
+    res.status(201).json({ asset: { id: asset.id, fileName: asset.fileName, sizeBytes: Number(asset.sizeBytes), variantId: asset.variantId } });
+  } catch {
+    await removeFile(req.file.path); await removeFile(privatePath(storageKey));
+    res.status(503).json({ message: "Não foi possível salvar o arquivo." });
+  }
+});
+
+router.get("/admin/products/:productId/beat-preview", requireAuth, requireAdmin, async (req, res) => {
+  const productId = String(req.params.productId);
+  const preview = await prisma.previewAudio.findFirst({ where: { groupId: `beat-${productId}` }, orderBy: { id: "desc" } });
+  const source = await prisma.mediaAsset.findUnique({ where: { id: `beat-source-${productId}` } });
+  const available = source && await stat(privatePath(source.storageKey)).catch(() => null);
+  res.json({ preview, source: available ? { fileName: source.fileName, url: `/api/media/admin/products/${productId}/beat-source` } : null });
+});
+
+router.get("/admin/products/:productId/beat-source", requireAuth, requireAdmin, async (req, res) => {
+  const source = await prisma.mediaAsset.findUnique({ where: { id: `beat-source-${req.params.productId}` } });
+  if (!source || !await stat(privatePath(source.storageKey)).catch(() => null)) return res.status(404).json({ message: "Áudio original indisponível." });
+  res.set({ "Cache-Control": "private, no-store", "Content-Type": source.mimeType });
+  res.sendFile(privatePath(source.storageKey));
 });
 
 router.post("/admin/products/:productId/beat-preview", requireAuth, requireAdmin, upload.single("file"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ message: "Envie o WAV ou MP3 de origem." });
+  const productId = String(req.params.productId);
   const input = z.object({ name: z.string().min(1).default("Preview"), startSec: z.coerce.number().min(0), endSec: z.coerce.number().positive() }).safeParse(req.body);
-  if (!input.success || input.data.endSec <= input.data.startSec || input.data.endSec - input.data.startSec > 30) { await removeFile(req.file.path); return res.status(400).json({ message: "Selecione um trecho válido de até 30 segundos." }); }
+  if (!input.success || !isValidPreviewRange(input.data.startSec, input.data.endSec)) {
+    if (req.file) await removeFile(req.file.path);
+    return res.status(400).json({ message: "Selecione um trecho válido de até 30 segundos." });
+  }
+  const product = await prisma.product.findUnique({ where: { id: productId } });
+  if (!product || product.type !== ProductType.BEAT) {
+    if (req.file) await removeFile(req.file.path);
+    return res.status(404).json({ message: "Beat não encontrado." });
+  }
+  const sourceId = `beat-source-${productId}`;
+  const oldSource = await prisma.mediaAsset.findUnique({ where: { id: sourceId } });
+  const inputPath = req.file?.path ?? (oldSource ? privatePath(oldSource.storageKey) : null);
+  if (!inputPath) return res.status(400).json({ message: "Envie o áudio original para editar este preview." });
+  let generatedPath: string | undefined;
+  let newSourcePath: string | undefined;
   try {
-    const generated = await generatePreview(req.file.path, input.data.startSec, input.data.endSec);
-    const group = await prisma.previewGroup.upsert({ where: { id: `beat-${req.params.productId}` }, update: {}, create: { id: `beat-${req.params.productId}`, productId: String(req.params.productId), name: "Beat preview" } });
-    await prisma.previewAudio.deleteMany({ where: { groupId: group.id } });
-    const item = await prisma.previewAudio.create({ data: { groupId: group.id, name: input.data.name, storageKey: generated.fileName, publicUrl: `/api/media/previews/${generated.fileName}`, durationSec: generated.durationSec, sourceStartSec: input.data.startSec, sourceEndSec: input.data.endSec } });
+    const generated = await generatePreview(inputPath, input.data.startSec, input.data.endSec);
+    generatedPath = generated.outputPath;
+    const sourceKey = req.file ? `beat-source-${nanoid()}${path.extname(req.file.originalname).toLowerCase()}` : undefined;
+    if (req.file && sourceKey) {
+      newSourcePath = privatePath(sourceKey);
+      await rename(req.file.path, newSourcePath);
+    }
+    const oldPreviews = await prisma.previewAudio.findMany({ where: { groupId: `beat-${productId}` }, select: { storageKey: true } });
+    const item = await prisma.$transaction(async tx => {
+      if (req.file && sourceKey) {
+        const data = { productId, kind: AssetKind.PREVIEW, storageKey: sourceKey, fileName: req.file.originalname, mimeType: req.file.mimetype, sizeBytes: req.file.size };
+        await tx.mediaAsset.upsert({ where: { id: sourceId }, create: { id: sourceId, ...data }, update: data });
+      }
+      const group = await tx.previewGroup.upsert({ where: { id: `beat-${productId}` }, update: {}, create: { id: `beat-${productId}`, productId, name: "Beat preview" } });
+      await tx.previewAudio.deleteMany({ where: { groupId: group.id } });
+      return tx.previewAudio.create({ data: { groupId: group.id, name: input.data.name, storageKey: generated.fileName, publicUrl: `/api/media/previews/${generated.fileName}`, durationSec: generated.durationSec, sourceStartSec: input.data.startSec, sourceEndSec: input.data.endSec } });
+    });
+    generatedPath = undefined;
+    newSourcePath = undefined;
+    await Promise.all(oldPreviews.map(item => removeFile(previewPath(item.storageKey))));
+    if (sourceKey && oldSource) await removeFile(privatePath(oldSource.storageKey));
     res.status(201).json({ preview: item });
   } catch (error) {
-    await discardDraftProduct(String(req.params.productId));
-    res.status(422).json({ message: error instanceof Error ? error.message : "Preview processing failed." });
-  } finally { await removeFile(req.file.path); }
+    if (generatedPath) await removeFile(generatedPath);
+    if (newSourcePath) await removeFile(newSourcePath);
+    res.status(422).json({ message: error instanceof Error ? error.message : "Falha ao gerar preview." });
+  } finally { if (req.file) await removeFile(req.file.path); }
 });
 
-router.post("/admin/products/:productId/drum-kit-previews", requireAuth, requireAdmin, upload.single("file"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ message: "Selecione o arquivo ZIP do Drum Kit." });
-  const product = await prisma.product.findUnique({ where: { id: String(req.params.productId) } });
-  if (!product || product.type !== ProductType.DRUM_KIT) { await removeFile(req.file.path); return res.status(400).json({ message: "O produto selecionado não é um Drum Kit." }); }
-  const work = await mkdtemp(path.join(tmpdir(), "hs-kit-"));
-  try {
-    const listing = await run("unzip", ["-Z1", req.file.path], true);
-    const audio = listing.split(/\r?\n/).filter(name => /\.(wav|mp3|aiff|aif|flac)$/i.test(name) && !name.includes("__MACOSX"));
-    const byGroup = new Map<string,string[]>();
-    for (const entry of audio) {
-      const parts = entry.split("/").filter(Boolean);
-      const group = parts.length > 1 ? parts.at(-2)! : "Samples";
-      const values = byGroup.get(group) ?? [];
-      if (values.length < 2) { values.push(entry); byGroup.set(group, values); }
-    }
-    if (!byGroup.size) await discardDraftProduct(product.id);
-    if (!byGroup.size) return res.status(400).json({ message: "Nenhum áudio compatível foi encontrado no ZIP." });
-    const old = await prisma.previewAudio.findMany({ where: { group: { productId: product.id } }, select: { storageKey: true } });
-    await prisma.previewGroup.deleteMany({ where: { productId: product.id } });
-    await Promise.all(old.map(item => removeFile(previewPath(item.storageKey))));
-    let total = 0; let position = 0;
-    for (const [groupName, entries] of byGroup) {
-      const group = await prisma.previewGroup.create({ data: { productId: product.id, name: groupName, position: position++ } });
-      let itemPosition = 0;
-      for (const entry of entries) {
-        const source = path.join(work, `source-${nanoid()}${path.extname(entry)}`);
-        const bytes = await new Promise<Buffer>((resolve, reject) => {
-          const child = spawn("unzip", ["-p", req.file!.path, entry]); const chunks: Buffer[] = []; let error = "";
-          child.stdout.on("data", chunk => chunks.push(chunk)); child.stderr.on("data", chunk => error += chunk.toString());
-          child.on("close", code => code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(error || "Falha ao extrair áudio."))); child.on("error", reject);
-        });
-        await writeFile(source, bytes);
-        const generated = await generatePreview(source, 0, 8, { allowSourceFallback: true });
-        await prisma.previewAudio.create({ data: { groupId: group.id, name: path.basename(entry, path.extname(entry)), storageKey: generated.fileName, publicUrl: `/api/media/previews/${generated.fileName}`, durationSec: generated.durationSec, position: itemPosition++ } });
-        total++;
-      }
-    }
-    res.status(201).json({ message: `${total} previews gerados em ${byGroup.size} categorias.`, groups: byGroup.size, previews: total });
-  } catch (error) {
-    await discardDraftProduct(product.id);
-    res.status(422).json({ message: error instanceof Error ? error.message : "Não foi possível processar o ZIP." });
-  } finally { await removeFile(req.file.path); await rm(work, { recursive: true, force: true }); }
-});
+router.use("/admin/products/:productId/drum-kit-previews", requireAuth, requireAdmin, kitPreviewRouter(upload));
 
 export default router;

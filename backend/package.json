@@ -13,6 +13,7 @@
     "prisma:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@auth/express": "^0.12.3",
     "@prisma/client": "^6.16.2",
     "bcryptjs": "^3.0.2",
     "cookie-parser": "^1.4.7",
@@ -20,7 +21,6 @@
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
-    "jose": "^6.1.0",
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "nanoid": "^5.1.5",
@@ -39,8 +39,15 @@
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   },
-  "prisma": { "seed": "tsx prisma/seed.ts" },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
   "pnpm": {
-    "onlyBuiltDependencies": ["@prisma/client", "@prisma/engines", "esbuild", "prisma"]
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "esbuild",
+      "prisma"
+    ]
   }
 }

@@ -21,7 +21,7 @@ Uma plataforma de e-commerce para venda de produtos digitais voltados à produç
 | Camada | Tecnologias |
 | --- | --- |
 | Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS e Lucide |
-| Backend | Node.js, Express 5, TypeScript, Zod, JWT (`jose`) e bcrypt |
+| Backend | Node.js, Express 5, TypeScript, Zod, Auth.js e bcrypt |
 | Dados | PostgreSQL 16 e Prisma ORM |
 | Infraestrutura local | Docker Compose e pnpm workspaces |
 | Processamento de áudio | FFmpeg e `unzip` |
@@ -42,11 +42,13 @@ Uma plataforma de e-commerce para venda de produtos digitais voltados à produç
 
 ## Pré-requisitos
 
-- Node.js 20 ou superior
-- pnpm 11
+- Node.js 24 LTS (versão validada neste projeto)
+- pnpm 11.19.0
 - Docker e Docker Compose
 - FFmpeg — necessário para gerar previews de áudio
 - `unzip` — necessário para extrair amostras de drum kits ZIP
+
+Se o FFmpeg estiver instalado fora do `PATH`, defina `FFMPEG_PATH` em `backend/.env` com o caminho do executável. Nesta configuração local, ele está em `../.tools/ffmpeg/node_modules/ffmpeg-static/ffmpeg` (caminho relativo à pasta `backend`).
 
 ## Como executar localmente
 
@@ -83,7 +85,9 @@ Uma plataforma de e-commerce para venda de produtos digitais voltados à produç
    ADMIN_NAME=Administrador
    ```
 
-4. Inicie o PostgreSQL:
+4. Se você já tem um PostgreSQL rodando, configure `DATABASE_URL` em `backend/.env` para esse banco e pule o comando abaixo. Não inicie outro container na mesma porta.
+
+   Caso precise criar um PostgreSQL local pelo Compose:
 
    ```bash
    pnpm db:up
@@ -105,6 +109,18 @@ Uma plataforma de e-commerce para venda de produtos digitais voltados à produç
 
    A loja estará em `http://localhost:3000` e a API em `http://localhost:4000`. Verifique a API em `http://localhost:4000/api/health`.
 
+## Testar no celular
+
+Com o celular na mesma rede Wi-Fi, abra a URL `Network` exibida por `pnpm dev` (porta 3000). As chamadas `/api` passam pelo Next.js, inclusive login, carrinho e áudios, sem apontar para o localhost do telefone. Os IPs das interfaces locais são autorizados automaticamente para os recursos de desenvolvimento; reinicie `pnpm dev` se mudar de rede.
+
+Se a API estiver em outro endereço, configure `API_URL` em `frontend/.env.local` e reinicie o frontend. O navegador sempre usa `/api` no endereço da loja; `NEXT_PUBLIC_API_URL` não é mais necessário. A sessão do IP da rede é independente da sessão em localhost: faça login novamente no celular.
+
+A aparência usa coral nos modos claro e escuro, inclusive para quem tinha a paleta anterior salva.
+
+## Layout das páginas da loja
+
+Use `SiteHeader` antes do conteúdo principal. O cabeçalho fica no fluxo normal e usa altura mínima, reservando automaticamente seu espaço mesmo quando crescer. Não aplique `position: absolute`/`fixed` ao cabeçalho nem offsets de altura nas páginas. O padding superior do conteúdo deve representar apenas o espaço visual desejado abaixo da navbar.
+
 ## Scripts disponíveis
 
 | Comando | Descrição |
@@ -124,8 +140,10 @@ Uma plataforma de e-commerce para venda de produtos digitais voltados à produç
 | --- | --- | --- | --- |
 | `GET` | `/api/health` | Público | Estado da API |
 | `POST` | `/api/auth/register` | Público | Cria uma conta de cliente |
-| `POST` | `/api/auth/login` | Público | Inicia uma sessão |
-| `POST` | `/api/auth/logout` | Público | Encerra a sessão |
+| `GET` | `/api/auth/csrf` | Público | Obtém o token CSRF para autenticação |
+| `POST` | `/api/auth/callback/credentials` | Público | Entra com email e senha pelo Auth.js |
+| `POST` | `/api/auth/signin/google` | Público | Inicia o acesso com Google pelo Auth.js |
+| `POST` | `/api/auth/signout` | Autenticado | Encerra a sessão pelo Auth.js |
 | `GET` | `/api/auth/me` | Autenticado | Retorna o usuário atual |
 | `GET` | `/api/products` | Público | Lista produtos ativos |
 | `GET` | `/api/products/:slug` | Público | Detalha um produto ativo |
@@ -145,4 +163,3 @@ Uma plataforma de e-commerce para venda de produtos digitais voltados à produç
 ## Licença
 
 Este projeto é privado. Todos os direitos reservados a Herculano Studios.
-
