@@ -1,0 +1,59 @@
+services:
+  database:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    image: herculano-api:production
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      PRIVATE_STORAGE_PATH: /app/storage/private
+      PREVIEW_STORAGE_PATH: /app/storage/previews
+    command: ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node dist/src/server.js"]
+    volumes:
+      - ./backend/storage/private:/app/storage/private
+      - ./backend/storage/previews:/app/storage/previews
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    image: herculano-frontend:production
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        API_URL: http://api:4000
+    restart: unless-stopped
+    environment:
+      API_URL: http://api:4000
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
