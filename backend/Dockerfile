@@ -3,12 +3,14 @@ RUN corepack enable && apt-get update && apt-get install -y --no-install-recomme
 WORKDIR /app
 FROM base AS development
 COPY package.json ./
+COPY pnpm-workspace.yaml ./
 RUN pnpm install
 COPY . .
 RUN pnpm prisma:generate
 CMD ["pnpm", "dev"]
 FROM base AS build
 COPY package.json ./
+COPY pnpm-workspace.yaml ./
 RUN pnpm install
 COPY . .
 RUN pnpm prisma:generate && pnpm build
